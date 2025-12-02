@@ -8,9 +8,9 @@ from slack_sdk.errors import SlackApiError
 
 app = Flask(__name__)
 
-# Use the env vars we will set on Render
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")            # xoxb-...
-SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")  # from Slack
+# Environment variables set in Render
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")        # xoxb-...
+SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")  # from Basic Info
 
 client = WebClient(token=SLACK_BOT_TOKEN)
 
@@ -23,7 +23,7 @@ def verify_slack_request(req):
     if not timestamp or not slack_signature:
         abort(400, "Missing Slack headers")
 
-    # protect against replay attacks (older than 5 minutes)
+    # Reject requests older than 5 minutes
     if abs(time.time() - int(timestamp)) > 60 * 5:
         abort(400, "Invalid timestamp")
 
@@ -40,52 +40,51 @@ def verify_slack_request(req):
 
 @app.route("/")
 def home():
-    return "Shopify Order Status Bot (Flask) is running!", 200
+    return "Slack bot is running!", 200
 
 
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
-    # 1) verify the request
+    # 1) verify Slack signature
     verify_slack_request(request)
 
     data = request.get_json()
 
-    # 2) URL verification from Slack (only on setup)
+    # 2) URL verification (only when you set the Request URL)
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge")})
 
-    # 3) real events
+    # 3) Actual events
     if data.get("type") == "event_callback":
         event = data.get("event", {})
 
-        # ignore messages from bots (including this one)
+        # Ignore our own bot messages
         if event.get("subtype") == "bot_message":
             return "", 200
 
+        # Handle message events
         if event.get("type") == "message":
             user = event.get("user")
-            text = event.get("text", "") or ""
+            text = (event.get("text") or "").lower()
             channel = event.get("channel")
             ts = event.get("ts")
 
             print(f"Received from {user} in {channel}: {text}")
 
             try:
-                # --- BASIC LOGIC EXAMPLE ---
-
-                # 1) Auto reply when message contains "status"
-                if "status" in text.lower():
+                # ------- AUTO REPLY EXAMPLE -------
+                if "hello" in text:
                     client.chat_postMessage(
                         channel=channel,
-                        thread_ts=ts,  # reply in thread
-                        text=f"Hi <@{user}>! 🛒 I'm checking your order status..."
+                        thread_ts=ts,  # reply in a thread
+                        text=f"Hi <@{user}> 👋, I got your message!"
                     )
 
-                # 2) Auto-react with ✅ to every message
+                # ------- AUTO REACTION EXAMPLE -------
                 client.reactions_add(
                     channel=channel,
                     timestamp=ts,
-                    name="white_check_mark"
+                    name="white_check_mark"  # :white_check_mark:
                 )
 
             except SlackApiError as e:
