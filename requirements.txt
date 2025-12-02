@@ -1,3 +1,3 @@
-flask
+Flask
+slack_sdk
 gunicorn
-requests
