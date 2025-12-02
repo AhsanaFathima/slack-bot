@@ -56,29 +56,37 @@ def slack_events():
 
     # 3) Actual events
     if data.get("type") == "event_callback":
-        event = data.get("event", {})
+        event = data.get("event", {}) or {}
 
-        # Ignore our own bot messages
-        if event.get("subtype") == "bot_message":
+        # Ignore messages from bots (including this bot)
+        if event.get("subtype") == "bot_message" or event.get("bot_id"):
             return "", 200
 
-        # Handle message events
+        # Handle message events only
         if event.get("type") == "message":
             user = event.get("user")
-            text = (event.get("text") or "").lower()
+            text = (event.get("text") or "")
             channel = event.get("channel")
             ts = event.get("ts")
 
-            print(f"Received from {user} in {channel}: {text}")
+            # Sometimes there is no user (e.g. message_changed events)
+            if not user or not channel or not ts:
+                return "", 200
+
+            lower_text = text.lower().strip()
+            print(f"Received from {user} in {channel}: {lower_text}")
 
             try:
                 # ------- AUTO REPLY EXAMPLE -------
-                if "hello" in text:
-                    client.chat_postMessage(
-                        channel=channel,
-                        thread_ts=ts,  # reply in a thread
-                        text=f"Hi <@{user}> 👋, I got your message!"
-                    )
+                # Reply to ANY message for now
+                client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=ts,  # reply in a thread
+                    text=f"Hi <@{user}> 👋, I got your message: “{text}”"
+                )
+
+                # If you only want for hi/hello, you can do:
+                # if "hello" in lower_text or "hi" in lower_text:
 
                 # ------- AUTO REACTION EXAMPLE -------
                 client.reactions_add(
