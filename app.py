@@ -17,8 +17,11 @@ SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 SHOPIFY_SHOP = os.environ.get("SHOPIFY_SHOP")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 
-# This will be your **shopify-slack** channel, NOT #order
-DEFAULT_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
+# 🔴 Your Shopify-Slack channel
+TARGET_CHANNEL_ID = "C0A068PHZMY"
+
+# default Slack channel for Flow → Slack (if Flow doesn't send channel)
+DEFAULT_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", TARGET_CHANNEL_ID)
 
 client = WebClient(token=SLACK_BOT_TOKEN)
 
@@ -106,61 +109,56 @@ def home():
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
     """
-    Used only so the app can be verified by Slack and (optionally)
-    for simple test replies.
-
-    IMPORTANT: We now only respond in DEFAULT_CHANNEL_ID (your #shopify-slack).
-    In #order and all other channels we do nothing.
+    For every *user* message in TARGET_CHANNEL_ID:
+      - add a ✅ reaction
+      - send one threaded reply
+    Ignores all other channels and bot messages.
     """
     verify_slack_request(request)
     data = request.get_json()
 
-    # 1) URL verification
+    # 1) URL verification (when you set the Request URL in Slack)
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge")})
 
-    # 2) Normal event callbacks
+    # 2) Event callbacks
     if data.get("type") == "event_callback":
         event = data.get("event", {})
 
-        # Only handle plain user messages
+        # Only handle message events
         if event.get("type") != "message":
             return "", 200
 
-        # ignore edited/deleted/bot messages etc.
+        # ignore edits, deletes, bot messages, etc.
         if event.get("subtype") is not None:
             return "", 200
         if event.get("bot_id"):
             return "", 200
 
-        # ignore replies inside threads – only react to top-level
-        if event.get("thread_ts") and event.get("thread_ts") != event.get("ts"):
-            return "", 200
-
         channel = event.get("channel")
+        user = event.get("user")
+        text = (event.get("text") or "").strip()
+        ts = event.get("ts")
+        thread_ts = event.get("thread_ts")
 
-        # 🔒 Key change: only do anything in DEFAULT_CHANNEL_ID
-        # (set this to your #shopify-slack channel ID)
-        if DEFAULT_CHANNEL_ID and channel != DEFAULT_CHANNEL_ID:
-            # e.g. in #order we just ignore everything
+        # ❗ only our Shopify-Slack channel
+        if channel != TARGET_CHANNEL_ID:
             return "", 200
 
-        user = event.get("user")
-        text = (event.get("text") or "").lower()
-        ts = event.get("ts")
+        print(f"[SLACK] user={user} channel={channel} text={text}")
 
-        print(f"[SLACK] {user} in {channel}: {text}")
+        # only create a **threaded reply** for top-level messages
+        is_root_message = (thread_ts is None) or (thread_ts == ts)
 
         try:
-            # Simple demo: only reply when message contains "test"
-            if "test" in text:
+            if is_root_message:
                 client.chat_postMessage(
                     channel=channel,
-                    thread_ts=ts,  # reply in thread
-                    text=f"Hi <@{user}> 👋, I got your message: “{text}”",
+                    thread_ts=ts,
+                    text=f"Hi <@{user}> 👋, noted this message."
                 )
 
-            # add a ✅ reaction to the user's message (optional)
+            # Add a ✅ reaction on the original message
             client.reactions_add(
                 channel=channel,
                 timestamp=ts,
@@ -180,34 +178,34 @@ def slack_events():
 def shopify_order_status():
     """
     Called from Shopify Flow when:
-      - order status / payment / fulfillment changes.
+      - order created
+      - order transaction created (payment)
+      - order fulfilled, etc.
 
     Expected JSON body from Flow, for example:
 
     {
-      "order_id": "1234567890",          # plain numeric order ID or GID
+      "order_id": "gid://shopify/Order/1234567890",
       "order_name": "#1224",
-      "event_type": "payment",           # optional
-      "channel": "C0A068PHZMY"           # Slack channel id (optional, falls back to DEFAULT_CHANNEL_ID)
+      "event_type": "payment",        // optional, for your info
+      "channel": "C0A068PHZMY"        // Slack channel id (optional)
     }
     """
-    # ✅ FIX: actually read the JSON body
     data = request.get_json(force=True, silent=True) or {}
 
-    raw_id = data.get("order_id")  # e.g. "gid://shopify/Order/1234567" or "1234567"
-    if raw_id and "/" in str(raw_id):
-        order_id = int(str(raw_id).split("/")[-1])
-    else:
-        order_id = int(raw_id) if raw_id else None
+    raw_id = data.get("order_id")  # gid://shopify/Order/1234567
+    order_id = int(raw_id.split("/")[-1]) if raw_id else None
 
     order_name = data.get("order_name")   # "#1249"
     event_type = data.get("event_type")
     channel_id = data.get("channel") or DEFAULT_CHANNEL_ID
 
-    print(f"[FLOW] event_type={event_type}, order_id={order_id}, order_name={order_name}, channel={channel_id}")
+    print(f"[FLOW] event_type={event_type}, order_id={order_id}, "
+          f"order_name={order_name}, channel={channel_id}")
 
     if not (order_id and order_name and channel_id):
-        return jsonify({"ok": False, "error": "order_id, order_name, channel required"}), 400
+        return jsonify({"ok": False,
+                        "error": "order_id, order_name, channel required"}), 400
 
     # 1) Fetch order from Shopify
     try:
@@ -227,7 +225,8 @@ def shopify_order_status():
     fulfillment_status = order.get("fulfillment_status") or ""
 
     emoji = pick_emoji(payment_status, fulfillment_status)
-    print(f"[FLOW] payment={payment_status}, fulfillment={fulfillment_status}, emoji={emoji}")
+    print(f"[FLOW] payment={payment_status}, "
+          f"fulfillment={fulfillment_status}, emoji={emoji}")
 
     # 2) Find the original Slack message that contains this order name (e.g. "#1224")
     ts = find_message_ts_for_order(channel_id, order_name)
