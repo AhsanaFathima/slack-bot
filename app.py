@@ -17,7 +17,7 @@ SLACK_SIGNING_SECRET = os.environ.get("SLACK_SIGNING_SECRET")
 SHOPIFY_SHOP = os.environ.get("SHOPIFY_SHOP")
 SHOPIFY_ACCESS_TOKEN = os.environ.get("SHOPIFY_ACCESS_TOKEN")
 
-# default Slack channel (optional, used if Flow doesn't send channel)
+# This will be your **shopify-slack** channel, NOT #order
 DEFAULT_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID")
 
 client = WebClient(token=SLACK_BOT_TOKEN)
@@ -105,6 +105,13 @@ def home():
 # ---- SLACK EVENTS ----
 @app.route("/slack/events", methods=["POST"])
 def slack_events():
+    """
+    Used only so the app can be verified by Slack and (optionally)
+    for simple test replies.
+
+    IMPORTANT: We now only respond in DEFAULT_CHANNEL_ID (your #shopify-slack).
+    In #order and all other channels we do nothing.
+    """
     verify_slack_request(request)
     data = request.get_json()
 
@@ -116,90 +123,44 @@ def slack_events():
     if data.get("type") == "event_callback":
         event = data.get("event", {})
 
-        # Ignore bot messages (including this bot) so we don't loop
-        if event.get("subtype") == "bot_message" or event.get("bot_id"):
-            return "", 200
-
-        # We only care about normal message events
-        if event.get("type") == "message":
-            user = event.get("user")
-            text = event.get("text") or ""
-            channel = event.get("channel")
-            ts = event.get("ts")
-            thread_ts = event.get("thread_ts")
-
-            print(f"[SLACK] {user} in {channel}: {text}")
-
-            # Only reply to top-level messages (no reply to replies)
-            is_root_message = (thread_ts is None) or (thread_ts == ts)
-            if is_root_message:
-                try:
-                    # Threaded reply for ANY message
-                    client.chat_postMessage(
-                        channel=channel,
-                        thread_ts=ts,
-                        text=f"Hi <@{user}> 👋, I got your message: “{text}”"
-                    )
-
-                    # Add a ✅ reaction on the original message
-                    client.reactions_add(
-                        channel=channel,
-                        timestamp=ts,
-                        name="white_check_mark"
-                    )
-
-                except SlackApiError as e:
-                    print(f"Slack API error: {e.response['error']}")
-
-        return "", 200
-
-    return "", 200
-
-def slack_events():
-    verify_slack_request(request)
-    data = request.get_json()
-
-    # URL verification when setting Request URL
-    if data.get("type") == "url_verification":
-        return jsonify({"challenge": data.get("challenge")})
-
-    if data.get("type") == "event_callback":
-        event = data.get("event", {})
-
         # Only handle plain user messages
         if event.get("type") != "message":
             return "", 200
 
-        # 🔒 IMPORTANT: ignore anything that's not a normal user message
+        # ignore edited/deleted/bot messages etc.
         if event.get("subtype") is not None:
-            # message_changed, message_deleted, bot_message, etc.
             return "", 200
-
-        # extra safety: ignore messages posted by bots
         if event.get("bot_id"):
             return "", 200
 
-        # ignore replies inside an existing thread – only react to top-level
+        # ignore replies inside threads – only react to top-level
         if event.get("thread_ts") and event.get("thread_ts") != event.get("ts"):
+            return "", 200
+
+        channel = event.get("channel")
+
+        # 🔒 Key change: only do anything in DEFAULT_CHANNEL_ID
+        # (set this to your #shopify-slack channel ID)
+        if DEFAULT_CHANNEL_ID and channel != DEFAULT_CHANNEL_ID:
+            # e.g. in #order we just ignore everything
             return "", 200
 
         user = event.get("user")
         text = (event.get("text") or "").lower()
-        channel = event.get("channel")
         ts = event.get("ts")
 
         print(f"[SLACK] {user} in {channel}: {text}")
 
         try:
-            # simple demo behaviour: only when message contains "test"
+            # Simple demo: only reply when message contains "test"
             if "test" in text:
                 client.chat_postMessage(
                     channel=channel,
                     thread_ts=ts,  # reply in thread
-                    text=f"Hi <@{user}> 👋, I got your message: “{text}”"
+                    text=f"Hi <@{user}> 👋, I got your message: “{text}”",
                 )
 
-            # add a ✅ reaction to the user's message
+            # add a ✅ reaction to the user's message (optional)
             client.reactions_add(
                 channel=channel,
                 timestamp=ts,
@@ -207,7 +168,6 @@ def slack_events():
             )
 
         except SlackApiError as e:
-            # don't crash the handler; just log
             print(f"[SLACK] API error: {e.response.get('error')}")
 
         return "", 200
@@ -220,23 +180,28 @@ def slack_events():
 def shopify_order_status():
     """
     Called from Shopify Flow when:
-      - order created
-      - order transaction created (payment)
-      - order fulfilled, etc.
+      - order status / payment / fulfillment changes.
 
     Expected JSON body from Flow, for example:
 
     {
-      "order_id": 1234567890,
+      "order_id": "1234567890",          # plain numeric order ID or GID
       "order_name": "#1224",
-      "event_type": "payment",        // optional, for your info
-      "channel": "C12345678"          // Slack channel id (optional if DEFAULT_CHANNEL_ID set)
+      "event_type": "payment",           # optional
+      "channel": "C0A068PHZMY"           # Slack channel id (optional, falls back to DEFAULT_CHANNEL_ID)
     }
     """
-    data = request.get_json() or {}
-    order_id = data.get("order_id")
-    order_name = (data.get("order_name") or "").strip()
-    event_type = data.get("event_type")  # not required, just logged
+    # ✅ FIX: actually read the JSON body
+    data = request.get_json(force=True, silent=True) or {}
+
+    raw_id = data.get("order_id")  # e.g. "gid://shopify/Order/1234567" or "1234567"
+    if raw_id and "/" in str(raw_id):
+        order_id = int(str(raw_id).split("/")[-1])
+    else:
+        order_id = int(raw_id) if raw_id else None
+
+    order_name = data.get("order_name")   # "#1249"
+    event_type = data.get("event_type")
     channel_id = data.get("channel") or DEFAULT_CHANNEL_ID
 
     print(f"[FLOW] event_type={event_type}, order_id={order_id}, order_name={order_name}, channel={channel_id}")
