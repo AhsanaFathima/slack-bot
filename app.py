@@ -108,6 +108,57 @@ def slack_events():
     verify_slack_request(request)
     data = request.get_json()
 
+    # 1) URL verification
+    if data.get("type") == "url_verification":
+        return jsonify({"challenge": data.get("challenge")})
+
+    # 2) Normal event callbacks
+    if data.get("type") == "event_callback":
+        event = data.get("event", {})
+
+        # Ignore bot messages (including this bot) so we don't loop
+        if event.get("subtype") == "bot_message" or event.get("bot_id"):
+            return "", 200
+
+        # We only care about normal message events
+        if event.get("type") == "message":
+            user = event.get("user")
+            text = event.get("text") or ""
+            channel = event.get("channel")
+            ts = event.get("ts")
+            thread_ts = event.get("thread_ts")
+
+            print(f"[SLACK] {user} in {channel}: {text}")
+
+            # Only reply to top-level messages (no reply to replies)
+            is_root_message = (thread_ts is None) or (thread_ts == ts)
+            if is_root_message:
+                try:
+                    # Threaded reply for ANY message
+                    client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=ts,
+                        text=f"Hi <@{user}> 👋, I got your message: “{text}”"
+                    )
+
+                    # Add a ✅ reaction on the original message
+                    client.reactions_add(
+                        channel=channel,
+                        timestamp=ts,
+                        name="white_check_mark"
+                    )
+
+                except SlackApiError as e:
+                    print(f"Slack API error: {e.response['error']}")
+
+        return "", 200
+
+    return "", 200
+
+def slack_events():
+    verify_slack_request(request)
+    data = request.get_json()
+
     # URL verification when setting Request URL
     if data.get("type") == "url_verification":
         return jsonify({"challenge": data.get("challenge")})
